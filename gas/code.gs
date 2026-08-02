@@ -8,9 +8,13 @@
  *  2) 関数「setup」を1回実行（フォルダ・シート・トリガー自動作成）
  *******************************************************/
 
+/* APIキーと合言葉は「スクリプト プロパティ」に保存する（コードには書かない）。
+ * GASエディタ左下の ⚙プロジェクトの設定 → スクリプト プロパティ で
+ *   GEMINI_API_KEY … AI StudioのAPIキー
+ *   API_TOKEN      … 検索アプリの合言葉（好きな英数字）
+ * を登録する。こうしておけばコードを貼り直しても設定は消えない。
+ * 登録できているかは checkSetup() を実行して確認する。 */
 const CONFIG = {
-  GEMINI_API_KEY: '',        // ← GASエディタ側で入力する。ここには絶対に書かない
-  API_TOKEN: '',             // ← GASエディタ側で入力する。ここには絶対に書かない        // 検索アプリ用の合言葉（好きな英数字に変更）
   MODEL: 'gemini-3.5-flash',       // 無料枠で使えるモデル。エラーが出たらAI Studioの一覧の名前に変更
   MODEL_FALLBACK: 'gemini-2.5-flash', // 上が使えない場合に自動で試すモデル
   MAX_PER_RUN: 5,                  // 1回のトリガーで処理する最大件数
@@ -22,6 +26,28 @@ const CONFIG = {
 
 const PROP = PropertiesService.getScriptProperties();
 const HEADERS = ['日時', '名前', '電話番号', '通話時間(目安)', '要約', '全文', '音声リンク', 'ファイル名', '状態'];
+
+function apiKey() { return String(PROP.getProperty('GEMINI_API_KEY') || '').trim(); }
+function apiToken() { return String(PROP.getProperty('API_TOKEN') || '').trim(); }
+
+/* ============ 設定の確認（困ったときに最初に実行する） ============
+ * スクリプトプロパティ・フォルダ・シート・トリガーが揃っているかを点検する */
+function checkSetup() {
+  const mask = function (s) { return s ? s.substring(0, 4) + '…(' + s.length + '文字)' : '未設定！'; };
+  Logger.log('GEMINI_API_KEY: ' + mask(apiKey()));
+  Logger.log('API_TOKEN: ' + mask(apiToken()));
+  ['INBOX_ID', 'DONE_ID', 'ERR_ID', 'SS_ID'].forEach(function (k) {
+    Logger.log(k + ': ' + (PROP.getProperty(k) ? 'OK' : '未設定！ setup()を実行してください'));
+  });
+  const t = ScriptApp.getProjectTriggers().map(function (x) { return x.getHandlerFunction(); });
+  Logger.log('トリガー: ' + (t.length ? t.join(', ') : 'なし！ setup()を実行してください'));
+  try {
+    const sh = SpreadsheetApp.openById(PROP.getProperty('SS_ID')).getSheetByName('通話記録');
+    Logger.log('通話記録シート: ' + (sh ? (sh.getLastRow() - 1) + '件' : '見つかりません！'));
+  } catch (e) {
+    Logger.log('スプレッドシートを開けません: ' + e);
+  }
+}
 
 /* ============ 初期セットアップ（1回だけ実行） ============ */
 function setup() {
@@ -74,8 +100,8 @@ function setup() {
 /* ============ メイン処理（5分毎に自動実行） ============ */
 function processNewRecordings() {
   // キー未設定なら何もしない（空のまま動かすと全件エラー行になってしまうため）
-  if (!CONFIG.GEMINI_API_KEY || CONFIG.GEMINI_API_KEY.indexOf('ここに') === 0) {
-    Logger.log('GEMINI_API_KEY が未設定です。CONFIG に APIキーを入れてください');
+  if (!apiKey()) {
+    Logger.log('GEMINI_API_KEY が未設定です。プロジェクトの設定→スクリプト プロパティに登録してください');
     return;
   }
 
@@ -542,16 +568,21 @@ function fetchWithAuth(url, opt) {
 function fetchGemini(base, opt, mode) {
   const o = Object.assign({}, opt);
   if (mode === 'header') {
-    o.headers = Object.assign({}, opt.headers, { 'x-goog-api-key': CONFIG.GEMINI_API_KEY });
+    o.headers = Object.assign({}, opt.headers, { 'x-goog-api-key': apiKey() });
     return UrlFetchApp.fetch(base, o);
   }
   return UrlFetchApp.fetch(base + (base.indexOf('?') >= 0 ? '&' : '?') +
-    'key=' + encodeURIComponent(CONFIG.GEMINI_API_KEY), o);
+    'key=' + encodeURIComponent(apiKey()), o);
 }
 
 /* ============ 接続テスト（キーが有効か確認する用） ============
  * 関数「testApiKey」を実行 → ログに「OK」が出れば準備完了 */
 function testApiKey() {
+  if (!apiKey()) {
+    Logger.log('NG：GEMINI_API_KEY が未設定です。' +
+      'プロジェクトの設定→スクリプト プロパティ に GEMINI_API_KEY を登録してください');
+    return;
+  }
   const model = CONFIG.MODEL;
   const payload = { contents: [{ parts: [{ text: 'こんにちは、と一言返してください。' }] }] };
   const opt = { method: 'post', contentType: 'application/json',
@@ -630,9 +661,26 @@ function appendRecord(sheet, row) {
 function doGet(e) {
   const p = (e && e.parameter) || {};
   const cb = p.callback || '';
-  if (p.token !== CONFIG.API_TOKEN) return jsonOut({ error: 'unauthorized' }, cb);
+  // 例外をそのまま投げるとGoogleのHTMLエラーページが返り、PWA側は「応答がありません」
+  // としか分からなくなる。必ずJSON(P)で理由を返す
+  try {
+    return handleGet(p, cb);
+  } catch (err) {
+    return jsonOut({ error: 'server', detail: String(err && err.message || err).substring(0, 300) }, cb);
+  }
+}
 
-  const sheet = SpreadsheetApp.openById(PROP.getProperty('SS_ID')).getSheetByName('通話記録');
+function handleGet(p, cb) {
+  const token = apiToken();
+  if (!token) return jsonOut({ error: 'no_token', detail: 'スクリプトプロパティ API_TOKEN が未設定です' }, cb);
+  if (p.token !== token) return jsonOut({ error: 'unauthorized' }, cb);
+
+  if (p.ping === '1') return jsonOut({ ok: true }, cb); // 接続テスト用
+
+  const ss = PROP.getProperty('SS_ID');
+  if (!ss) return jsonOut({ error: 'server', detail: 'SS_IDが未設定です。setup()を実行してください' }, cb);
+  const sheet = SpreadsheetApp.openById(ss).getSheetByName('通話記録');
+  if (!sheet) return jsonOut({ error: 'server', detail: '「通話記録」シートが見つかりません' }, cb);
   if (sheet.getLastRow() < 2) return jsonOut({ count: 0, rows: [] }, cb);
 
   const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, HEADERS.length).getValues();

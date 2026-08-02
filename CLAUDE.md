@@ -25,7 +25,7 @@ PWA（index.html・GitHub Pages）
 | パス | 役割 |
 |---|---|
 | `index.html` | 検索PWA。単一ファイル。設定はlocalStorageに保存 |
-| `gas/code.gs` | GAS本体。**このリポジトリ版はAPIキー空欄**。実物はGASエディタ側にのみ存在 |
+| `gas/code.gs` | GAS本体。APIキー・合言葉はコードに書かず**スクリプトプロパティ**から読む |
 
 ## スプレッドシート「通話記録DB」
 
@@ -43,6 +43,7 @@ PWA（index.html・GitHub Pages）
 |---|---|
 | `setup()` | 初回のみ。フォルダ・シート・トリガーを作成 |
 | `processNewRecordings()` | 5分毎トリガー本体 |
+| `checkSetup()` | 設定の総点検。困ったらまずこれ（キー・フォルダ・シート・トリガー） |
 | `testApiKey()` | APIキーと認証方式の疎通確認 |
 | `retryErrors()` | エラーフォルダの音声を受信へ戻し、エラー行を削除して再処理 |
 | `fixExisting()` | 既存レコードに用語辞書を一括適用 |
@@ -60,6 +61,11 @@ GET <webapp>/exec?token=<API_TOKEN>[&q=][&name=][&tel=][&from=][&to=][&id=][&ful
 
 ## 実装上の注意（ハマりどころ）
 
+- **秘密情報**：`GEMINI_API_KEY` / `API_TOKEN` はスクリプトプロパティに置く。
+  コードを貼り直しても消えないので、貼り直しのたびにキーを入れ直す事故が起きない
+- **doGetは例外を投げない**：例外を投げるとGoogleのHTMLエラーページが返り、
+  JSONPは無反応（PWA上は「応答がありません」）になり原因が分からなくなる。
+  必ずtry/catchして `{"error":"server","detail":...}` を返す
 - **CORS**：GAS webappへのfetchはブラウザに弾かれる。JSONP必須
 - **再デプロイ**：コード変更後は「デプロイを管理→編集→バージョン**新バージョン**→デプロイ」。
   バージョンを据え置くと旧コードが動き続ける
