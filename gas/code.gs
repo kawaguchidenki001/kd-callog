@@ -99,7 +99,7 @@ function processNewRecordings() {
       }
       items.push({ file: f, p: p });
     }
-    items.sort(function (a, b) { return a.p.date - b.p.date; });
+    items.sort(function (a, b) { return b.p.date - a.p.date; }); // 新しい順（直近の通話を優先。過去分は空き枠で消化）
 
     let count = 0;
     for (let i = 0; i < items.length; i++) {
