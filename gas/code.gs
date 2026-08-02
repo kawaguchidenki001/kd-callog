@@ -127,6 +127,11 @@ function processNewRecordings() {
         let name = p.name, tel = p.tel;
         if (tel && !name) name = master.nameByTel[normTel(tel)] || '';
         if (name && !tel) tel = master.telByName[name] || '';
+        // 未登録番号の名寄せ：通話中に相手が名乗っていたら名前を採用し、マスタへ候補行を追加
+        if (tel && !name && g.name) {
+          name = g.name;
+          addMasterCandidate(g.name, g.company, tel, master);
+        }
 
         f.moveTo(done);
         appendRecord(sheet, [
@@ -320,7 +325,17 @@ function transcribe(blob) {
       PROP.setProperty('ACTIVE_MODEL', CONFIG.MODEL_FALLBACK);
     } else throw e;
   }
-  return { transcript: applyDict(r.transcript, dict), summary: applyDict(r.summary, dict) };
+  return withDict(r, dict);
+}
+
+/* 文字起こし結果の全フィールドに用語辞書を適用 */
+function withDict(r, dict) {
+  return {
+    transcript: applyDict(r.transcript, dict),
+    summary: applyDict(r.summary, dict),
+    name: applyDict(r.name || '', dict),
+    company: applyDict(r.company || '', dict)
+  };
 }
 
 /* ============ 長時間通話（18MB超）: Files API経由 ============
@@ -345,7 +360,7 @@ function transcribeLarge(file) {
         PROP.setProperty('ACTIVE_MODEL', CONFIG.MODEL_FALLBACK);
       } else throw e;
     }
-    return { transcript: applyDict(r.transcript, dict), summary: applyDict(r.summary, dict) };
+    return withDict(r, dict);
   } finally {
     filesApiDelete(up.name);
   }
@@ -418,8 +433,9 @@ function callGemini(dataPart, model, hints) {
   const prompt =
     'これは業務電話の録音です。日本語で正確に文字起こしし、話者を「A:」「B:」で区別して1発言ごとに改行してください。' +
     '聞き取れない箇所は（不明瞭）としてください。加えて内容の要約を2文以内で作成してください。' +
+    'また、電話の相手が会話中に名乗っていた場合は、その名前を"name"、会社名・屋号を"company"に入れてください（不明なら空文字）。' +
     (hints ? '登場する可能性のある固有名詞（この表記を優先して使うこと）: ' + hints + '。' : '') +
-    '次の形式のJSONのみを返してください: {"transcript":"...","summary":"..."}';
+    '次の形式のJSONのみを返してください: {"transcript":"...","summary":"...","name":"...","company":"..."}';
 
   const base = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent';
 
@@ -485,15 +501,19 @@ function parseResult(raw) {
   // ③ それでもダメなら中身を正規表現で拾う
   var mt = t.match(/"transcript"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   var ms = t.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-  if (mt) return { transcript: unesc(mt[1]), summary: ms ? unesc(ms[1]) : '' };
+  var mn = t.match(/"name"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  var mc = t.match(/"company"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (mt) return { transcript: unesc(mt[1]), summary: ms ? unesc(ms[1]) : '',
+    name: mn ? unesc(mn[1]) : '', company: mc ? unesc(mc[1]) : '' };
 
   // ④ 最後の手段：応答テキストをそのまま全文として保存（捨てない）
-  if (t.length > 20) return { transcript: t, summary: '' };
+  if (t.length > 20) return { transcript: t, summary: '', name: '', company: '' };
   throw new Error('解析不能な応答');
 }
 
 function pick(j) {
-  return { transcript: String(j.transcript || ''), summary: String(j.summary || '') };
+  return { transcript: String(j.transcript || ''), summary: String(j.summary || ''),
+    name: String(j.name || ''), company: String(j.company || '') };
 }
 function unesc(s) {
   return String(s).replace(/\\n/g, '\n').replace(/\\t/g, '\t')
@@ -543,6 +563,40 @@ function testApiKey() {
       Logger.log('NG(' + mode + ') ' + res.getResponseCode() + ': ' + res.getContentText().substring(0, 300));
     }
   });
+}
+
+/* ============ 顧客マスタの自動拡充（未登録番号の名寄せ） ============
+ * 未登録番号の通話で相手が名乗っていた場合、マスタへ「要確認」付きの
+ * 候補行を自動追加する。間違いがあればシート上で直せば以後はその表記が使われる */
+function addMasterCandidate(name, company, tel, master) {
+  name = String(name || '').trim();
+  const key = normTel(tel);
+  if (!name || name.length > 30 || !key || master.nameByTel[key]) return;
+  const sh = SpreadsheetApp.openById(PROP.getProperty('SS_ID')).getSheetByName('顧客マスタ');
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  appendRecord(sh, [name, String(company || '').trim(), tel, '自動追加 ' + today + ' 要確認']);
+  // 同一実行内の後続ファイルにも効かせる
+  master.nameByTel[key] = name;
+  if (!master.telByName[name]) master.telByName[name] = tel;
+}
+
+/* ============ 過去の記録の名前をマスタから一括補完 ============
+ * 関数「fillNamesFromMaster」を実行すると、名前が空で電話番号がマスタに
+ * ある行の名前を埋めます（自動追加分を確認・修正した後に実行すると便利） */
+function fillNamesFromMaster() {
+  const master = loadMaster();
+  const sheet = SpreadsheetApp.openById(PROP.getProperty('SS_ID')).getSheetByName('通話記録');
+  if (sheet.getLastRow() < 2) { Logger.log('記録がありません'); return; }
+  const n = sheet.getLastRow() - 1;
+  const rg = sheet.getRange(2, 2, n, 2); // 名前・電話番号
+  const v = rg.getValues();
+  let hit = 0;
+  for (let i = 0; i < n; i++) {
+    const name = String(v[i][0]).trim(), tel = normTel(String(v[i][1]));
+    if (!name && tel && master.nameByTel[tel]) { v[i][0] = master.nameByTel[tel]; hit++; }
+  }
+  if (hit) rg.setValues(v);
+  Logger.log(hit + '件の名前を補完しました');
 }
 
 /* ============ 顧客マスタ読込 ============ */
