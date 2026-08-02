@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#14202B">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>通話記録</title>
+<style>
+:root{
+  --ink:#14202B; --ink-2:#4A5A67; --ink-3:#8496A2;
+  --paper:#EDF0F1; --card:#FFFFFF; --line:#D6DDE1;
+  --sig:#0B6E7F;          /* 交換台のブルーグリーン */
+  --mark:#F5D765;         /* 検索ヒット */
+  --rail:#C9D4D9;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:"Hiragino Kaku Gothic ProN","Noto Sans JP","Yu Gothic UI",system-ui,sans-serif;
+  font-size:16px; line-height:1.6; padding-bottom:env(safe-area-inset-bottom);
+}
+button,input{font:inherit;color:inherit}
+
+/* ---- ヘッダー ---- */
+header{
+  position:sticky; top:0; z-index:20; background:var(--ink); color:#fff;
+  padding:calc(10px + env(safe-area-inset-top)) 12px 10px;
+}
+.htop{display:flex;align-items:center;gap:10px}
+.htitle{font-size:15px;font-weight:700;letter-spacing:.14em;flex:1}
+.hcount{font-size:12px;color:#9DB4BE;font-variant-numeric:tabular-nums}
+.gear{background:none;border:0;color:#9DB4BE;font-size:20px;padding:4px 6px;cursor:pointer}
+.search{display:flex;align-items:center;gap:8px;margin-top:9px;background:#22323F;border-radius:11px;padding:0 12px}
+.search input{flex:1;background:none;border:0;outline:none;color:#fff;padding:12px 0;font-size:16px}
+.search input::placeholder{color:#7E93A0}
+.clear{background:none;border:0;color:#7E93A0;font-size:19px;padding:4px;display:none;cursor:pointer}
+.chips{display:flex;gap:7px;margin-top:9px;overflow-x:auto;scrollbar-width:none}
+.chips::-webkit-scrollbar{display:none}
+.chip{white-space:nowrap;background:#22323F;border:1px solid #3347559e;color:#B9CBD4;
+  padding:6px 13px;border-radius:999px;font-size:13px;cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--sig);border-color:var(--sig);color:#fff;font-weight:700}
+
+/* ---- 一覧（左に時刻レール） ---- */
+main{padding:10px 12px 28px}
+.day{display:flex;align-items:center;gap:9px;margin:16px 2px 8px}
+.day b{font-size:12.5px;letter-spacing:.1em;color:var(--ink-2);font-weight:700;font-variant-numeric:tabular-nums}
+.day span{flex:1;height:1px;background:var(--line)}
+.row{
+  display:grid; grid-template-columns:52px 1fr; gap:10px; align-items:start;
+  background:var(--card); border:1px solid var(--line); border-radius:12px;
+  padding:12px 13px 12px 10px; margin-bottom:8px; width:100%; text-align:left; cursor:pointer;
+}
+.row:active{background:#F5F8F9}
+.time{
+  font-variant-numeric:tabular-nums; font-size:15px; font-weight:700; color:var(--ink);
+  border-right:2px solid var(--rail); padding-right:9px; min-height:38px;
+}
+.time small{display:block;font-size:10.5px;font-weight:600;color:var(--ink-3);letter-spacing:.04em}
+.name{font-weight:700;font-size:15.5px;line-height:1.35;word-break:break-all}
+.sum{font-size:13.5px;color:var(--ink-2);margin-top:3px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tel{font-size:12px;color:var(--ink-3);font-variant-numeric:tabular-nums;margin-top:3px}
+mark{background:var(--mark);color:var(--ink);padding:0 1px;border-radius:2px}
+
+/* ---- 状態表示 ---- */
+.note{text-align:center;color:var(--ink-2);font-size:14px;padding:44px 20px;line-height:1.9}
+.note b{display:block;font-size:15px;color:var(--ink);margin-bottom:6px}
+.spin{width:22px;height:22px;border:2.5px solid var(--rail);border-top-color:var(--sig);
+  border-radius:50%;margin:0 auto 12px;animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation-duration:2.4s}}
+
+/* ---- 詳細（全画面） ---- */
+.sheet{position:fixed;inset:0;z-index:40;background:var(--paper);display:none;flex-direction:column}
+.sheet.on{display:flex}
+.sbar{background:var(--ink);color:#fff;padding:calc(9px + env(safe-area-inset-top)) 8px 9px;
+  display:flex;align-items:center;gap:6px}
+.sbar button{background:none;border:0;color:#fff;font-size:15px;padding:8px 10px;cursor:pointer;border-radius:8px}
+.sbar .t{flex:1;font-size:15px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sbody{flex:1;overflow-y:auto;padding:16px 14px 40px;-webkit-overflow-scrolling:touch}
+.meta{font-size:13px;color:var(--ink-2);font-variant-numeric:tabular-nums;margin-bottom:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+.card h3{margin:0 0 7px;font-size:11.5px;letter-spacing:.16em;color:var(--sig);font-weight:700}
+.card+.card{margin-top:11px}
+.full{white-space:pre-wrap;word-break:break-word;font-size:15px;line-height:1.85}
+.audio{display:inline-block;margin-top:11px;color:var(--sig);font-weight:700;font-size:14px;text-decoration:none}
+
+/* ---- 設定 ---- */
+.cfg{position:fixed;inset:0;z-index:60;background:var(--paper);display:none;overflow-y:auto}
+.cfg.on{display:block}
+.cfgin{max-width:520px;margin:0 auto;padding:calc(26px + env(safe-area-inset-top)) 18px 40px}
+.cfgin h2{font-size:19px;margin:0 0 4px}
+.cfgin p{font-size:13.5px;color:var(--ink-2);margin:0 0 20px}
+label{display:block;font-size:12.5px;font-weight:700;letter-spacing:.08em;color:var(--ink-2);margin:14px 0 5px}
+.cfg input{width:100%;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+.save{width:100%;margin-top:20px;padding:14px;border:0;border-radius:11px;background:var(--sig);
+  color:#fff;font-weight:700;font-size:16px;cursor:pointer}
+.back{width:100%;margin-top:9px;padding:12px;border:1px solid var(--line);border-radius:11px;
+  background:none;color:var(--ink-2);cursor:pointer}
+.err{background:#FDEBEB;border:1px solid #F0B9B9;color:#8A2A2A;border-radius:10px;
+  padding:11px 13px;font-size:13.5px;margin-top:14px;display:none}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="htop">
+    <div class="htitle">通話記録</div>
+    <div class="hcount" id="count"></div>
+    <button class="gear" id="gear" aria-label="設定">⚙</button>
+  </div>
+  <div class="search">
+    <span style="color:#7E93A0">🔍</span>
+    <input id="q" type="search" placeholder="名前・電話番号・会話の内容" enterkeyhint="search" autocomplete="off">
+    <button class="clear" id="clear" aria-label="消す">✕</button>
+  </div>
+  <div class="chips" id="chips">
+    <button class="chip" data-d="1" aria-pressed="false">今日</button>
+    <button class="chip" data-d="7" aria-pressed="false">7日</button>
+    <button class="chip" data-d="30" aria-pressed="false">30日</button>
+    <button class="chip" data-d="0" aria-pressed="true">すべて</button>
+  </div>
+</header>
+
+<main id="list"></main>
+
+<div class="sheet" id="sheet">
+  <div class="sbar">
+    <button id="close">‹ 戻る</button>
+    <div class="t" id="sTitle"></div>
+    <button id="copy">コピー</button>
+  </div>
+  <div class="sbody">
+    <div class="meta" id="sMeta"></div>
+    <div class="card" id="sSumWrap"><h3>要約</h3><div id="sSum"></div></div>
+    <div class="card"><h3>通話内容</h3><div class="full" id="sFull"></div>
+      <a class="audio" id="sAudio" target="_blank" rel="noopener">▶ 録音を再生</a></div>
+  </div>
+</div>
+
+<div class="cfg" id="cfg">
+  <div class="cfgin">
+    <h2>接続設定</h2>
+    <p>GASで発行したウェブアプリのURLと合言葉を入れると、通話記録を読み込みます。</p>
+    <label for="cUrl">ウェブアプリURL</label>
+    <input id="cUrl" type="url" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off">
+    <label for="cTok">合言葉（API_TOKEN）</label>
+    <input id="cTok" type="text" placeholder="kensaku2026" autocomplete="off">
+    <button class="save" id="cSave">保存して読み込む</button>
+    <button class="back" id="cBack">戻る</button>
+    <div class="err" id="cErr"></div>
+  </div>
+</div>
+
+<script>
+var S={url:'',tok:'',rows:[],days:0,q:'',busy:false};
+var $=function(i){return document.getElementById(i)};
+
+/* 設定の保存（プライベートモード等で失敗しても動くようにする） */
+function load(){try{S.url=localStorage.getItem('tk_url')||'';S.tok=localStorage.getItem('tk_tok')||''}catch(e){}}
+function save(){try{localStorage.setItem('tk_url',S.url);localStorage.setItem('tk_tok',S.tok)}catch(e){}}
+
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function hl(s,q){ s=esc(s); if(!q) return s;
+  var i=s.toLowerCase().indexOf(q.toLowerCase()); if(i<0) return s;
+  return s.slice(0,i)+'<mark>'+s.slice(i,i+q.length)+'</mark>'+s.slice(i+q.length);}
+
+/* JSONP通信：ブラウザのCORS制約を受けずに読み込む */
+var jpN=0;
+function api(p){
+  return new Promise(function(res,rej){
+    var name='tkcb'+(++jpN)+'_'+Date.now();
+    var s=document.createElement('script');
+    var done=false;
+    var to=setTimeout(function(){ if(!done){done=true;cleanup();
+      rej(new Error('応答がありません。URLとデプロイ設定（アクセス＝全員）を確認してください'))} },20000);
+    function cleanup(){clearTimeout(to);try{delete window[name]}catch(e){window[name]=undefined}
+      if(s.parentNode)s.parentNode.removeChild(s)}
+    window[name]=function(j){ if(done)return; done=true; cleanup();
+      if(j&&j.error==='unauthorized'){rej(new Error('合言葉が違います。設定を確認してください'));return}
+      res(j);
+    };
+    s.onerror=function(){ if(done)return; done=true; cleanup();
+      rej(new Error('接続できません。ウェブアプリURLを確認してください')) };
+    s.src=S.url+(S.url.indexOf('?')<0?'?':'&')+'token='+encodeURIComponent(S.tok)
+         +'&callback='+name+p;
+    document.body.appendChild(s);
+  });
+}
+
+function fetchList(){
+  if(!S.url||!S.tok){show(cfgOpen(true));return}
+  S.busy=true; render();
+  var p='&limit=200'+(S.q?'&q='+encodeURIComponent(S.q):'');
+  api(p).then(function(j){S.rows=j.rows||[];S.busy=false;render()})
+        .catch(function(e){S.busy=false;S.rows=null;render(e.message)});
+}
+function show(){}
+
+function filtered(){
+  if(!S.rows) return [];
+  if(!S.days) return S.rows;
+  var lim=new Date(Date.now()-(S.days-1)*86400000);
+  lim=lim.getFullYear()+'-'+('0'+(lim.getMonth()+1)).slice(-2)+'-'+('0'+lim.getDate()).slice(-2);
+  return S.rows.filter(function(r){return r.datetime>=lim});
+}
+
+function render(err){
+  var L=$('list');
+  if(S.busy){L.innerHTML='<div class="note"><div class="spin"></div>読み込んでいます</div>';$('count').textContent='';return}
+  if(err){L.innerHTML='<div class="note"><b>読み込めませんでした</b>'+esc(err)+'</div>';$('count').textContent='';return}
+  var rows=filtered();
+  $('count').textContent=rows.length?rows.length+'件':'';
+  if(!rows.length){
+    L.innerHTML='<div class="note"><b>'+(S.q?'見つかりません':'まだ記録がありません')+'</b>'+
+      (S.q?'別のことばで探してみてください':'電話をかけると自動で記録されます')+'</div>';return}
+  var h='',day='';
+  rows.forEach(function(r,i){
+    var d=r.datetime.slice(0,10), t=r.datetime.slice(11,16);
+    if(d!==day){day=d;h+='<div class="day"><b>'+d.replace(/-/g,'/')+'　'+youbi(d)+'</b><span></span></div>'}
+    h+='<button class="row" data-i="'+i+'">'+
+       '<div class="time">'+t+'<small>'+(r.length||'').replace('程度','')+'</small></div><div>'+
+       '<div class="name">'+hl(r.name||r.tel||'不明',S.q)+'</div>'+
+       (r.summary?'<div class="sum">'+hl(r.summary,S.q)+'</div>':'')+
+       (r.name&&r.tel?'<div class="tel">'+esc(r.tel)+'</div>':'')+
+       '</div></button>';
+  });
+  L.innerHTML=h;
+  Array.prototype.forEach.call(L.querySelectorAll('.row'),function(b){
+    b.onclick=function(){open(rows[+b.dataset.i])}});
+}
+function youbi(d){var w=['日','月','火','水','木','金','土'];
+  var p=d.split('-');return '('+w[new Date(p[0],p[1]-1,p[2]).getDay()]+')'}
+
+var cur=null;
+function open(r){
+  cur=r;
+  $('sTitle').textContent=r.name||r.tel||'不明';
+  $('sMeta').textContent=r.datetime.replace(/-/g,'/')+(r.tel?'　'+r.tel:'')+(r.length?'　'+r.length:'');
+  $('sSumWrap').style.display=r.summary?'':'none';
+  $('sSum').textContent=r.summary||'';
+  $('sFull').textContent='読み込んでいます…';
+  $('sAudio').style.display=r.audio?'':'none';
+  if(r.audio)$('sAudio').href=r.audio;
+  $('sheet').classList.add('on');
+  api('&id='+r.id+'&full=1').then(function(j){
+    var f=(j.rows&&j.rows[0])?j.rows[0]:null;
+    cur.transcript=f&&f.transcript?f.transcript:'（文字起こしがありません）';
+    $('sFull').textContent=cur.transcript;
+  }).catch(function(e){$('sFull').textContent='読み込めませんでした：'+e.message});
+}
+$('close').onclick=function(){$('sheet').classList.remove('on')};
+$('copy').onclick=function(){
+  if(!cur)return;
+  var t=(cur.name||cur.tel)+' '+cur.datetime+'\n'+(cur.summary||'')+'\n\n'+(cur.transcript||'');
+  if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){
+    $('copy').textContent='コピー済';setTimeout(function(){$('copy').textContent='コピー'},1400)})}
+};
+
+/* 検索 */
+var tm=null;
+$('q').oninput=function(){
+  $('clear').style.display=this.value?'block':'none';
+  clearTimeout(tm); var v=this.value.trim();
+  tm=setTimeout(function(){S.q=v;fetchList()},420);
+};
+$('clear').onclick=function(){$('q').value='';$('clear').style.display='none';S.q='';fetchList()};
+Array.prototype.forEach.call($('chips').children,function(c){
+  c.onclick=function(){
+    Array.prototype.forEach.call($('chips').children,function(o){o.setAttribute('aria-pressed','false')});
+    c.setAttribute('aria-pressed','true'); S.days=+c.dataset.d; render();
+  }});
+
+/* 設定 */
+function cfgOpen(first){
+  $('cUrl').value=S.url;$('cTok').value=S.tok;
+  $('cErr').style.display='none';
+  $('cBack').style.display=first?'none':'';
+  $('cfg').classList.add('on');
+}
+$('gear').onclick=function(){cfgOpen(false)};
+$('cBack').onclick=function(){$('cfg').classList.remove('on')};
+$('cSave').onclick=function(){
+  var u=$('cUrl').value.trim(), t=$('cTok').value.trim();
+  if(!/^https:\/\/script\.google\.com\/.+\/exec/.test(u)){
+    $('cErr').textContent='URLは https://script.google.com/… で始まり /exec で終わります';
+    $('cErr').style.display='block';return}
+  if(!t){$('cErr').textContent='合言葉を入れてください';$('cErr').style.display='block';return}
+  S.url=u;S.tok=t;save();$('cfg').classList.remove('on');fetchList();
+};
+
+load();
+if(S.url&&S.tok) fetchList(); else cfgOpen(true);
+</script>
+</body>
+</html>
