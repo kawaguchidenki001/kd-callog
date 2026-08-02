@@ -14,7 +14,8 @@ const CONFIG = {
   MODEL: 'gemini-3.5-flash',       // 無料枠で使えるモデル。エラーが出たらAI Studioの一覧の名前に変更
   MODEL_FALLBACK: 'gemini-2.5-flash', // 上が使えない場合に自動で試すモデル
   MAX_PER_RUN: 5,                  // 1回のトリガーで処理する最大件数
-  MAX_INLINE_MB: 18,               // これを超える音声はDrive経由(Files API不要の分割)へ回さずスキップ
+  MAX_INLINE_MB: 18,               // これ以下はリクエストに直接埋め込む。超えたらFiles API経由
+  MAX_FILE_MB: 45,                 // Files API経由の上限(約45分の通話)。UrlFetchApp制限のためこれ超はスキップ
   TRIGGER_MINUTES: 5,              // 何分おきに新着チェックするか
   AUDIO_KEEP_DAYS: 90              // 処理済み音声を何日後に自動削除するか（0で削除しない）
 };
@@ -98,7 +99,7 @@ function processNewRecordings() {
       }
       items.push({ file: f, p: p });
     }
-    items.sort(function (a, b) { return a.p.date - b.p.date; });
+    items.sort(function (a, b) { return b.p.date - a.p.date; }); // 新しい順（直近の通話を優先。過去分は空き枠で消化）
 
     let count = 0;
     for (let i = 0; i < items.length; i++) {
@@ -109,19 +110,28 @@ function processNewRecordings() {
       const p = items[i].p;
       const sizeMB = f.getSize() / (1024 * 1024);
 
-      if (sizeMB > CONFIG.MAX_INLINE_MB) {
+      if (sizeMB > CONFIG.MAX_FILE_MB) {
         f.moveTo(errF);
         appendRecord(sheet, [p.date, p.name, p.tel, '', '', '', '', f.getName(),
           '大容量スキップ(' + sizeMB.toFixed(1) + 'MB)']);
         continue;
       }
 
+      // 18MB超はアップロード＋処理待ちで数分かかるため、残り時間に余裕がある時だけ着手
+      const isLarge = sizeMB > CONFIG.MAX_INLINE_MB;
+      if (isLarge && Date.now() - startMs > 150 * 1000) continue;
+
       try {
-        const g = transcribe(f.getBlob());
+        const g = isLarge ? transcribeLarge(f) : transcribe(f.getBlob());
         // 顧客マスタで名前⇔番号を補完
         let name = p.name, tel = p.tel;
         if (tel && !name) name = master.nameByTel[normTel(tel)] || '';
         if (name && !tel) tel = master.telByName[name] || '';
+        // 未登録番号の名寄せ：通話中に相手が名乗っていたら名前を採用し、マスタへ候補行を追加
+        if (tel && !name && g.name) {
+          name = g.name;
+          addMasterCandidate(g.name, g.company, tel, master);
+        }
 
         f.moveTo(done);
         appendRecord(sheet, [
@@ -296,39 +306,142 @@ function parseFileName(fname) {
 }
 
 /* ============ Gemini文字起こし ============ */
+function inlinePart(blob, mime) {
+  return { inline_data: { mime_type: mime, data: Utilities.base64Encode(blob.getBytes()) } };
+}
+
 function transcribe(blob) {
   const model = PROP.getProperty('ACTIVE_MODEL') || CONFIG.MODEL;
   const hints = buildHints();
   const dict = loadDict();
   let r;
   try {
-    r = callGemini(blob, 'audio/mp4', model, hints);
+    r = callGemini(inlinePart(blob, 'audio/mp4'), model, hints);
   } catch (e) {
     const msg = String(e);
-    if (msg.indexOf('HTTP 400') >= 0) r = callGemini(blob, 'audio/aac', model, hints); // MIME違いの保険
+    if (msg.indexOf('HTTP 400') >= 0) r = callGemini(inlinePart(blob, 'audio/aac'), model, hints); // MIME違いの保険
     else if (msg.indexOf('HTTP 404') >= 0 && model !== CONFIG.MODEL_FALLBACK) {
-      r = callGemini(blob, 'audio/mp4', CONFIG.MODEL_FALLBACK, hints);
+      r = callGemini(inlinePart(blob, 'audio/mp4'), CONFIG.MODEL_FALLBACK, hints);
       PROP.setProperty('ACTIVE_MODEL', CONFIG.MODEL_FALLBACK);
     } else throw e;
   }
-  return { transcript: applyDict(r.transcript, dict), summary: applyDict(r.summary, dict) };
+  return withDict(r, dict);
 }
 
-function callGemini(blob, mime, model, hints) {
+/* 文字起こし結果の全フィールドに用語辞書を適用 */
+function withDict(r, dict) {
+  return {
+    transcript: applyDict(r.transcript, dict),
+    summary: applyDict(r.summary, dict),
+    name: applyDict(r.name || '', dict),
+    company: applyDict(r.company || '', dict)
+  };
+}
+
+/* ============ 長時間通話（18MB超）: Files API経由 ============
+ * インライン埋め込みの上限を超える音声は、いったんGeminiのFiles APIへ
+ * アップロードし、処理完了(ACTIVE)を待ってから文字起こしする。
+ * アップロードした一時ファイルは使用後すぐ削除（放置しても48時間で自動消滅） */
+function transcribeLarge(file) {
+  const mime = mimeFromName(file.getName());
+  const model = PROP.getProperty('ACTIVE_MODEL') || CONFIG.MODEL;
+  const hints = buildHints();
+  const dict = loadDict();
+  const up = filesApiUpload(file.getBlob(), mime);
+  try {
+    filesApiWaitActive(up.name);
+    const part = { file_data: { mime_type: mime, file_uri: up.uri } };
+    let r;
+    try {
+      r = callGemini(part, model, hints);
+    } catch (e) {
+      if (String(e).indexOf('HTTP 404') >= 0 && model !== CONFIG.MODEL_FALLBACK) {
+        r = callGemini(part, CONFIG.MODEL_FALLBACK, hints);
+        PROP.setProperty('ACTIVE_MODEL', CONFIG.MODEL_FALLBACK);
+      } else throw e;
+    }
+    return withDict(r, dict);
+  } finally {
+    filesApiDelete(up.name);
+  }
+}
+
+function mimeFromName(fname) {
+  if (/\.(3ga|3gp)$/i.test(fname)) return 'audio/3gpp';
+  if (/\.amr$/i.test(fname)) return 'audio/amr';
+  return 'audio/mp4'; // m4a / mp4
+}
+
+/* Files APIへ再開可能アップロード（開始→本体送信の2段階） */
+function filesApiUpload(blob, mime) {
+  const bytes = blob.getBytes();
+  const start = fetchWithAuth('https://generativelanguage.googleapis.com/upload/v1beta/files', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'X-Goog-Upload-Protocol': 'resumable',
+      'X-Goog-Upload-Command': 'start',
+      'X-Goog-Upload-Header-Content-Length': String(bytes.length),
+      'X-Goog-Upload-Header-Content-Type': mime
+    },
+    payload: JSON.stringify({ file: { display_name: blob.getName() } }),
+    muteHttpExceptions: true
+  });
+  const sc = start.getResponseCode();
+  if (sc === 429 || sc === 503) throw new Error('RATE_LIMIT');
+  if (sc !== 200) throw new Error('Files API開始失敗 HTTP ' + sc + ': ' + start.getContentText().substring(0, 200));
+  const h = start.getHeaders();
+  const uploadUrl = h['x-goog-upload-url'] || h['X-Goog-Upload-URL'] || h['X-Goog-Upload-Url'];
+  if (!uploadUrl) throw new Error('Files APIのアップロードURLが取得できませんでした');
+
+  const fin = UrlFetchApp.fetch(uploadUrl, {
+    method: 'post',
+    headers: { 'X-Goog-Upload-Command': 'upload, finalize', 'X-Goog-Upload-Offset': '0' },
+    payload: bytes,
+    muteHttpExceptions: true
+  });
+  const fc = fin.getResponseCode();
+  if (fc !== 200) throw new Error('Files API送信失敗 HTTP ' + fc + ': ' + fin.getContentText().substring(0, 200));
+  const j = JSON.parse(fin.getContentText());
+  if (!j.file || !j.file.uri) throw new Error('Files API応答にfile.uriがありません');
+  return { uri: j.file.uri, name: j.file.name };
+}
+
+/* アップロード後のサーバー側処理完了(ACTIVE)を待つ。最大約2分 */
+function filesApiWaitActive(name) {
+  const url = 'https://generativelanguage.googleapis.com/v1beta/' + name;
+  for (let i = 0; i < 24; i++) {
+    const res = fetchWithAuth(url, { method: 'get', muteHttpExceptions: true });
+    if (res.getResponseCode() === 200) {
+      const st = JSON.parse(res.getContentText()).state;
+      if (st === 'ACTIVE') return;
+      if (st === 'FAILED') throw new Error('Files APIの音声処理に失敗しました');
+    }
+    Utilities.sleep(5000);
+  }
+  throw new Error('Files API処理待ちタイムアウト');
+}
+
+function filesApiDelete(name) {
+  try {
+    fetchWithAuth('https://generativelanguage.googleapis.com/v1beta/' + name,
+      { method: 'delete', muteHttpExceptions: true });
+  } catch (e) { /* 削除失敗は無視（48時間で自動消滅する） */ }
+}
+
+function callGemini(dataPart, model, hints) {
   const prompt =
     'これは業務電話の録音です。日本語で正確に文字起こしし、話者を「A:」「B:」で区別して1発言ごとに改行してください。' +
     '聞き取れない箇所は（不明瞭）としてください。加えて内容の要約を2文以内で作成してください。' +
+    'また、電話の相手が会話中に名乗っていた場合は、その名前を"name"、会社名・屋号を"company"に入れてください（不明なら空文字）。' +
     (hints ? '登場する可能性のある固有名詞（この表記を優先して使うこと）: ' + hints + '。' : '') +
-    '次の形式のJSONのみを返してください: {"transcript":"...","summary":"..."}';
+    '次の形式のJSONのみを返してください: {"transcript":"...","summary":"...","name":"...","company":"..."}';
 
   const base = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent';
 
   const payload = {
     contents: [{
-      parts: [
-        { inline_data: { mime_type: mime, data: Utilities.base64Encode(blob.getBytes()) } },
-        { text: prompt }
-      ]
+      parts: [dataPart, { text: prompt }]
     }],
     generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
   };
@@ -339,17 +452,7 @@ function callGemini(blob, mime, model, hints) {
     muteHttpExceptions: true
   };
 
-  // 認証方式：①x-goog-api-keyヘッダー ②?key= クエリ の順に試す
-  // （新形式AQ.キー／旧形式AIzaキーのどちらでも通るようにするため）
-  const mode = PROP.getProperty('AUTH_MODE') || 'header';
-  let res = fetchGemini(base, opt, mode);
-  if (res.getResponseCode() === 401 || res.getResponseCode() === 403) {
-    const other = mode === 'header' ? 'query' : 'header';
-    const res2 = fetchGemini(base, opt, other);
-    if (res2.getResponseCode() === 200) { PROP.setProperty('AUTH_MODE', other); res = res2; }
-    else res = res2.getResponseCode() === 401 ? res : res2;
-  }
-
+  const res = fetchWithAuth(base, opt);
   const code = res.getResponseCode();
   if (code === 429 || code === 503) throw new Error('RATE_LIMIT');
   if (code !== 200) throw new Error('HTTP ' + code + ': ' + res.getContentText().substring(0, 200));
@@ -398,28 +501,48 @@ function parseResult(raw) {
   // ③ それでもダメなら中身を正規表現で拾う
   var mt = t.match(/"transcript"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   var ms = t.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-  if (mt) return { transcript: unesc(mt[1]), summary: ms ? unesc(ms[1]) : '' };
+  var mn = t.match(/"name"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  var mc = t.match(/"company"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (mt) return { transcript: unesc(mt[1]), summary: ms ? unesc(ms[1]) : '',
+    name: mn ? unesc(mn[1]) : '', company: mc ? unesc(mc[1]) : '' };
 
   // ④ 最後の手段：応答テキストをそのまま全文として保存（捨てない）
-  if (t.length > 20) return { transcript: t, summary: '' };
+  if (t.length > 20) return { transcript: t, summary: '', name: '', company: '' };
   throw new Error('解析不能な応答');
 }
 
 function pick(j) {
-  return { transcript: String(j.transcript || ''), summary: String(j.summary || '') };
+  return { transcript: String(j.transcript || ''), summary: String(j.summary || ''),
+    name: String(j.name || ''), company: String(j.company || '') };
 }
 function unesc(s) {
   return String(s).replace(/\\n/g, '\n').replace(/\\t/g, '\t')
     .replace(/\\"/g, '"').replace(/\\\\/g, '\\');
 }
 
+/* 認証方式：①x-goog-api-keyヘッダー ②?key= クエリ の順に試す
+ * （新形式AQ.キー／旧形式AIzaキーのどちらでも通るようにするため）
+ * 成功した方式を ScriptProperties に記憶して次回から使う */
+function fetchWithAuth(url, opt) {
+  const mode = PROP.getProperty('AUTH_MODE') || 'header';
+  let res = fetchGemini(url, opt, mode);
+  if (res.getResponseCode() === 401 || res.getResponseCode() === 403) {
+    const other = mode === 'header' ? 'query' : 'header';
+    const res2 = fetchGemini(url, opt, other);
+    if (res2.getResponseCode() === 200) { PROP.setProperty('AUTH_MODE', other); res = res2; }
+    else res = res2.getResponseCode() === 401 ? res : res2;
+  }
+  return res;
+}
+
 function fetchGemini(base, opt, mode) {
   const o = Object.assign({}, opt);
   if (mode === 'header') {
-    o.headers = { 'x-goog-api-key': CONFIG.GEMINI_API_KEY };
+    o.headers = Object.assign({}, opt.headers, { 'x-goog-api-key': CONFIG.GEMINI_API_KEY });
     return UrlFetchApp.fetch(base, o);
   }
-  return UrlFetchApp.fetch(base + '?key=' + encodeURIComponent(CONFIG.GEMINI_API_KEY), o);
+  return UrlFetchApp.fetch(base + (base.indexOf('?') >= 0 ? '&' : '?') +
+    'key=' + encodeURIComponent(CONFIG.GEMINI_API_KEY), o);
 }
 
 /* ============ 接続テスト（キーが有効か確認する用） ============
@@ -440,6 +563,40 @@ function testApiKey() {
       Logger.log('NG(' + mode + ') ' + res.getResponseCode() + ': ' + res.getContentText().substring(0, 300));
     }
   });
+}
+
+/* ============ 顧客マスタの自動拡充（未登録番号の名寄せ） ============
+ * 未登録番号の通話で相手が名乗っていた場合、マスタへ「要確認」付きの
+ * 候補行を自動追加する。間違いがあればシート上で直せば以後はその表記が使われる */
+function addMasterCandidate(name, company, tel, master) {
+  name = String(name || '').trim();
+  const key = normTel(tel);
+  if (!name || name.length > 30 || !key || master.nameByTel[key]) return;
+  const sh = SpreadsheetApp.openById(PROP.getProperty('SS_ID')).getSheetByName('顧客マスタ');
+  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  appendRecord(sh, [name, String(company || '').trim(), tel, '自動追加 ' + today + ' 要確認']);
+  // 同一実行内の後続ファイルにも効かせる
+  master.nameByTel[key] = name;
+  if (!master.telByName[name]) master.telByName[name] = tel;
+}
+
+/* ============ 過去の記録の名前をマスタから一括補完 ============
+ * 関数「fillNamesFromMaster」を実行すると、名前が空で電話番号がマスタに
+ * ある行の名前を埋めます（自動追加分を確認・修正した後に実行すると便利） */
+function fillNamesFromMaster() {
+  const master = loadMaster();
+  const sheet = SpreadsheetApp.openById(PROP.getProperty('SS_ID')).getSheetByName('通話記録');
+  if (sheet.getLastRow() < 2) { Logger.log('記録がありません'); return; }
+  const n = sheet.getLastRow() - 1;
+  const rg = sheet.getRange(2, 2, n, 2); // 名前・電話番号
+  const v = rg.getValues();
+  let hit = 0;
+  for (let i = 0; i < n; i++) {
+    const name = String(v[i][0]).trim(), tel = normTel(String(v[i][1]));
+    if (!name && tel && master.nameByTel[tel]) { v[i][0] = master.nameByTel[tel]; hit++; }
+  }
+  if (hit) rg.setValues(v);
+  Logger.log(hit + '件の名前を補完しました');
 }
 
 /* ============ 顧客マスタ読込 ============ */

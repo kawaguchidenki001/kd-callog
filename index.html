@@ -146,9 +146,11 @@ label{display:block;font-size:12.5px;font-weight:700;letter-spacing:.08em;color:
     <h2>接続設定</h2>
     <p>GASで発行したウェブアプリのURLと合言葉を入れると、通話記録を読み込みます。</p>
     <label for="cUrl">ウェブアプリURL</label>
-    <input id="cUrl" type="url" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off">
+    <input id="cUrl" type="url" placeholder="https://script.google.com/macros/s/.../exec"
+      autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" inputmode="url">
     <label for="cTok">合言葉（API_TOKEN）</label>
-    <input id="cTok" type="text" placeholder="kensaku2026" autocomplete="off">
+    <input id="cTok" type="text" placeholder="kensaku2026"
+      autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
     <button class="save" id="cSave">保存して読み込む</button>
     <button class="back" id="cBack">戻る</button>
     <div class="err" id="cErr"></div>
@@ -177,11 +179,11 @@ function api(p){
     var s=document.createElement('script');
     var done=false;
     var to=setTimeout(function(){ if(!done){done=true;cleanup();
-      rej(new Error('応答がありません。URLとデプロイ設定（アクセス＝全員）を確認してください'))} },20000);
+      rej(new Error('応答がありません。GASのデプロイ設定「アクセスできるユーザー」が「全員」か確認してください（「全員」以外だとログインしていないスマホ等で開けません）'))} },20000);
     function cleanup(){clearTimeout(to);try{delete window[name]}catch(e){window[name]=undefined}
       if(s.parentNode)s.parentNode.removeChild(s)}
     window[name]=function(j){ if(done)return; done=true; cleanup();
-      if(j&&j.error==='unauthorized'){rej(new Error('合言葉が違います。設定を確認してください'));return}
+      if(j&&j.error==='unauthorized'){rej(new Error('合言葉が違います。大文字/小文字や余分な文字がないか確認してください'));return}
       res(j);
     };
     s.onerror=function(){ if(done)return; done=true; cleanup();
@@ -284,8 +286,14 @@ function cfgOpen(first){
 }
 $('gear').onclick=function(){cfgOpen(false)};
 $('cBack').onclick=function(){$('cfg').classList.remove('on')};
+/* スマホ入力対策：全角英数記号→半角、空白・不可視文字を除去 */
+function normIn(s){
+  return String(s||'')
+    .replace(/[\uFF01-\uFF5E]/g,function(c){return String.fromCharCode(c.charCodeAt(0)-0xFEE0)})
+    .replace(/[\s\u200B-\u200D\uFEFF\u3000]/g,'');
+}
 $('cSave').onclick=function(){
-  var u=$('cUrl').value.trim(), t=$('cTok').value.trim();
+  var u=normIn($('cUrl').value), t=normIn($('cTok').value);
   if(!/^https:\/\/script\.google\.com\/.+\/exec/.test(u)){
     $('cErr').textContent='URLは https://script.google.com/… で始まり /exec で終わります';
     $('cErr').style.display='block';return}
