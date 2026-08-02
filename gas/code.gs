@@ -8,9 +8,13 @@
  *  2) 関数「setup」を1回実行（フォルダ・シート・トリガー自動作成）
  *******************************************************/
 
+/* APIキーと合言葉は「スクリプト プロパティ」に保存する（コードには書かない）。
+ * GASエディタ左下の ⚙プロジェクトの設定 → スクリプト プロパティ で
+ *   GEMINI_API_KEY … AI StudioのAPIキー
+ *   API_TOKEN      … 検索アプリの合言葉（好きな英数字）
+ * を登録する。こうしておけばコードを貼り直しても設定は消えない。
+ * 登録できているかは checkSetup() を実行して確認する。 */
 const CONFIG = {
-  GEMINI_API_KEY: '',        // ← GASエディタ側で入力する。ここには絶対に書かない
-  API_TOKEN: '',             // ← GASエディタ側で入力する。ここには絶対に書かない        // 検索アプリ用の合言葉（好きな英数字に変更）
   MODEL: 'gemini-3.5-flash',       // 無料枠で使えるモデル。エラーが出たらAI Studioの一覧の名前に変更
   MODEL_FALLBACK: 'gemini-2.5-flash', // 上が使えない場合に自動で試すモデル
   MAX_PER_RUN: 5,                  // 1回のトリガーで処理する最大件数
@@ -22,6 +26,28 @@ const CONFIG = {
 
 const PROP = PropertiesService.getScriptProperties();
 const HEADERS = ['日時', '名前', '電話番号', '通話時間(目安)', '要約', '全文', '音声リンク', 'ファイル名', '状態'];
+
+function apiKey() { return String(PROP.getProperty('GEMINI_API_KEY') || '').trim(); }
+function apiToken() { return String(PROP.getProperty('API_TOKEN') || '').trim(); }
+
+/* ============ 設定の確認（困ったときに最初に実行する） ============
+ * スクリプトプロパティ・フォルダ・シート・トリガーが揃っているかを点検する */
+function checkSetup() {
+  const mask = function (s) { return s ? s.substring(0, 4) + '…(' + s.length + '文字)' : '未設定！'; };
+  Logger.log('GEMINI_API_KEY: ' + mask(apiKey()));
+  Logger.log('API_TOKEN: ' + mask(apiToken()));
+  ['INBOX_ID', 'DONE_ID', 'ERR_ID', 'SS_ID'].forEach(function (k) {
+    Logger.log(k + ': ' + (PROP.getProperty(k) ? 'OK' : '未設定！ setup()を実行してください'));
+  });
+  const t = ScriptApp.getProjectTriggers().map(function (x) { return x.getHandlerFunction(); });
+  Logger.log('トリガー: ' + (t.length ? t.join(', ') : 'なし！ setup()を実行してください'));
+  try {
+    const sh = SpreadsheetApp.openById(PROP.getProperty('SS_ID')).getSheetByName('通話記録');
+    Logger.log('通話記録シート: ' + (sh ? (sh.getLastRow() - 1) + '件' : '見つかりません！'));
+  } catch (e) {
+    Logger.log('スプレッドシートを開けません: ' + e);
+  }
+}
 
 /* ============ 初期セットアップ（1回だけ実行） ============ */
 function setup() {
@@ -74,8 +100,8 @@ function setup() {
 /* ============ メイン処理（5分毎に自動実行） ============ */
 function processNewRecordings() {
   // キー未設定なら何もしない（空のまま動かすと全件エラー行になってしまうため）
-  if (!CONFIG.GEMINI_API_KEY || CONFIG.GEMINI_API_KEY.indexOf('ここに') === 0) {
-    Logger.log('GEMINI_API_KEY が未設定です。CONFIG に APIキーを入れてください');
+  if (!apiKey()) {
+    Logger.log('GEMINI_API_KEY が未設定です。プロジェクトの設定→スクリプト プロパティに登録してください');
     return;
   }
 
@@ -542,16 +568,21 @@ function fetchWithAuth(url, opt) {
 function fetchGemini(base, opt, mode) {
   const o = Object.assign({}, opt);
   if (mode === 'header') {
-    o.headers = Object.assign({}, opt.headers, { 'x-goog-api-key': CONFIG.GEMINI_API_KEY });
+    o.headers = Object.assign({}, opt.headers, { 'x-goog-api-key': apiKey() });
     return UrlFetchApp.fetch(base, o);
   }
   return UrlFetchApp.fetch(base + (base.indexOf('?') >= 0 ? '&' : '?') +
-    'key=' + encodeURIComponent(CONFIG.GEMINI_API_KEY), o);
+    'key=' + encodeURIComponent(apiKey()), o);
 }
 
 /* ============ 接続テスト（キーが有効か確認する用） ============
  * 関数「testApiKey」を実行 → ログに「OK」が出れば準備完了 */
 function testApiKey() {
+  if (!apiKey()) {
+    Logger.log('NG：GEMINI_API_KEY が未設定です。' +
+      'プロジェクトの設定→スクリプト プロパティ に GEMINI_API_KEY を登録してください');
+    return;
+  }
   const model = CONFIG.MODEL;
   const payload = { contents: [{ parts: [{ text: 'こんにちは、と一言返してください。' }] }] };
   const opt = { method: 'post', contentType: 'application/json',
@@ -630,44 +661,98 @@ function appendRecord(sheet, row) {
 function doGet(e) {
   const p = (e && e.parameter) || {};
   const cb = p.callback || '';
-  if (p.token !== CONFIG.API_TOKEN) return jsonOut({ error: 'unauthorized' }, cb);
-
-  const sheet = SpreadsheetApp.openById(PROP.getProperty('SS_ID')).getSheetByName('通話記録');
-  if (sheet.getLastRow() < 2) return jsonOut({ count: 0, rows: [] }, cb);
-
-  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, HEADERS.length).getValues();
-  let rows = values.map(function (r, i) {
-    return {
-      id: i + 2,
-      datetime: r[0] instanceof Date ? Utilities.formatDate(r[0], 'Asia/Tokyo', 'yyyy-MM-dd HH:mm') : String(r[0]),
-      name: String(r[1]), tel: String(r[2]), length: String(r[3]),
-      summary: String(r[4]), transcript: String(r[5]),
-      audio: String(r[6]), status: String(r[8])
-    };
-  });
-
-  if (p.id) { // 1件詳細
-    const one = rows.filter(function (r) { return String(r.id) === String(p.id); });
-    return jsonOut({ count: one.length, rows: one }, cb);
+  // 例外をそのまま投げるとGoogleのHTMLエラーページが返り、PWA側は「応答がありません」
+  // としか分からなくなる。必ずJSON(P)で理由を返す
+  try {
+    return handleGet(p, cb);
+  } catch (err) {
+    return jsonOut({ error: 'server', detail: String(err && err.message || err).substring(0, 300) }, cb);
   }
+}
+
+function handleGet(p, cb) {
+  const token = apiToken();
+  if (!token) return jsonOut({ error: 'no_token', detail: 'スクリプトプロパティ API_TOKEN が未設定です' }, cb);
+  if (p.token !== token) return jsonOut({ error: 'unauthorized' }, cb);
+
+  if (p.ping === '1') return jsonOut({ ok: true }, cb); // 接続テスト用
+
+  const ss = PROP.getProperty('SS_ID');
+  if (!ss) return jsonOut({ error: 'server', detail: 'SS_IDが未設定です。setup()を実行してください' }, cb);
+  const sheet = SpreadsheetApp.openById(ss).getSheetByName('通話記録');
+  if (!sheet) return jsonOut({ error: 'server', detail: '「通話記録」シートが見つかりません' }, cb);
+  const last = sheet.getLastRow();
+  if (last < 2) return jsonOut({ count: 0, rows: [], last: last }, cb);
+
+  // ---- 1件詳細（全文つき）。該当行だけを読むので速い ----
+  if (p.id) {
+    const id = Number(p.id);
+    if (!(id >= 2 && id <= last)) return jsonOut({ count: 0, rows: [] }, cb);
+    const r = sheet.getRange(id, 1, 1, HEADERS.length).getValues()[0];
+    const one = rowObj(r, id);
+    one.transcript = String(r[5]);
+    return jsonOut({ count: 1, rows: [one] }, cb);
+  }
+
+  // ---- 差分取得：前回の続き（since行より後）だけを返す ----
+  // PWAは取得済みをローカルに保存しているので、通常はここを通り一瞬で返る
+  if (p.since) {
+    const since = Number(p.since);
+    if (!(since >= 2 && since <= last)) return jsonOut({ reload: true, last: last }, cb);
+    // 行が削除されて番号がずれていないか、ファイル名で照合する
+    if (p.sincekey && String(sheet.getRange(since, 8).getValue()) !== p.sincekey) {
+      return jsonOut({ reload: true, last: last }, cb);
+    }
+    const add = readRows(sheet, since + 1, last - since, false);
+    add.sort(byNewest);
+    return jsonOut({ count: add.length, rows: add, last: last, added: true }, cb);
+  }
+
+  // ---- 一覧・検索 ----
+  const needText = !!p.q; // 全文検索のときだけ全文を読む（重いので普段は読まない）
+  let rows = readRows(sheet, 2, last - 1, needText);
 
   if (p.name) rows = rows.filter(function (r) { return r.name.indexOf(p.name) >= 0; });
   if (p.tel) rows = rows.filter(function (r) { return normTel(r.tel).indexOf(normTel(p.tel)) >= 0; });
   if (p.from) rows = rows.filter(function (r) { return r.datetime >= p.from; });
   if (p.to) rows = rows.filter(function (r) { return r.datetime <= p.to + ' 99'; });
-  if (p.q) rows = rows.filter(function (r) {
-    return (r.name + r.tel + r.summary + r.transcript).indexOf(p.q) >= 0;
-  });
+  if (p.q) {
+    rows = rows.filter(function (r) {
+      return (r.name + r.tel + r.summary + r.transcript).indexOf(p.q) >= 0;
+    });
+    rows.forEach(function (r) { r.transcript = ''; }); // 一覧では使わないので返さない
+  }
 
-  rows.sort(function (a, b) { return a.datetime < b.datetime ? 1 : -1; }); // 新しい順
-  const limit = Math.min(Number(p.limit) || 100, 300);
-  rows = rows.slice(0, limit);
+  rows.sort(byNewest);
+  rows = rows.slice(0, Math.min(Number(p.limit) || 200, 1000));
+  return jsonOut({ count: rows.length, rows: rows, last: last }, cb);
+}
 
-  if (p.full !== '1') rows.forEach(function (r) { // 一覧は全文を先頭120字に
-    if (r.transcript.length > 120) r.transcript = r.transcript.substring(0, 120) + '…';
-  });
+function byNewest(a, b) { return a.datetime < b.datetime ? 1 : -1; }
 
-  return jsonOut({ count: rows.length, rows: rows }, cb);
+/* 必要な列だけ読む。全文(F列)は重いので withText のときだけ読む */
+function readRows(sheet, start, n, withText) {
+  if (n <= 0) return [];
+  const a = sheet.getRange(start, 1, n, 5).getValues();  // 日時〜要約
+  const b = sheet.getRange(start, 7, n, 3).getValues();  // 音声リンク・ファイル名・状態
+  const t = withText ? sheet.getRange(start, 6, n, 1).getValues() : null;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const o = rowObj([a[i][0], a[i][1], a[i][2], a[i][3], a[i][4], '', b[i][0], b[i][1], b[i][2]], start + i);
+    if (t) o.transcript = String(t[i][0]);
+    out.push(o);
+  }
+  return out;
+}
+
+function rowObj(r, id) {
+  return {
+    id: id,
+    datetime: r[0] instanceof Date ? Utilities.formatDate(r[0], 'Asia/Tokyo', 'yyyy-MM-dd HH:mm') : String(r[0]),
+    name: String(r[1]), tel: String(r[2]), length: String(r[3]),
+    summary: String(r[4]), transcript: '',
+    audio: String(r[6]), file: String(r[7]), status: String(r[8])
+  };
 }
 
 /* JSONP対応：callback指定時はJavaScriptとして返す（CORS制約を受けない） */
