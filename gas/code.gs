@@ -681,41 +681,78 @@ function handleGet(p, cb) {
   if (!ss) return jsonOut({ error: 'server', detail: 'SS_IDが未設定です。setup()を実行してください' }, cb);
   const sheet = SpreadsheetApp.openById(ss).getSheetByName('通話記録');
   if (!sheet) return jsonOut({ error: 'server', detail: '「通話記録」シートが見つかりません' }, cb);
-  if (sheet.getLastRow() < 2) return jsonOut({ count: 0, rows: [] }, cb);
+  const last = sheet.getLastRow();
+  if (last < 2) return jsonOut({ count: 0, rows: [], last: last }, cb);
 
-  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, HEADERS.length).getValues();
-  let rows = values.map(function (r, i) {
-    return {
-      id: i + 2,
-      datetime: r[0] instanceof Date ? Utilities.formatDate(r[0], 'Asia/Tokyo', 'yyyy-MM-dd HH:mm') : String(r[0]),
-      name: String(r[1]), tel: String(r[2]), length: String(r[3]),
-      summary: String(r[4]), transcript: String(r[5]),
-      audio: String(r[6]), status: String(r[8])
-    };
-  });
-
-  if (p.id) { // 1件詳細
-    const one = rows.filter(function (r) { return String(r.id) === String(p.id); });
-    return jsonOut({ count: one.length, rows: one }, cb);
+  // ---- 1件詳細（全文つき）。該当行だけを読むので速い ----
+  if (p.id) {
+    const id = Number(p.id);
+    if (!(id >= 2 && id <= last)) return jsonOut({ count: 0, rows: [] }, cb);
+    const r = sheet.getRange(id, 1, 1, HEADERS.length).getValues()[0];
+    const one = rowObj(r, id);
+    one.transcript = String(r[5]);
+    return jsonOut({ count: 1, rows: [one] }, cb);
   }
+
+  // ---- 差分取得：前回の続き（since行より後）だけを返す ----
+  // PWAは取得済みをローカルに保存しているので、通常はここを通り一瞬で返る
+  if (p.since) {
+    const since = Number(p.since);
+    if (!(since >= 2 && since <= last)) return jsonOut({ reload: true, last: last }, cb);
+    // 行が削除されて番号がずれていないか、ファイル名で照合する
+    if (p.sincekey && String(sheet.getRange(since, 8).getValue()) !== p.sincekey) {
+      return jsonOut({ reload: true, last: last }, cb);
+    }
+    const add = readRows(sheet, since + 1, last - since, false);
+    add.sort(byNewest);
+    return jsonOut({ count: add.length, rows: add, last: last, added: true }, cb);
+  }
+
+  // ---- 一覧・検索 ----
+  const needText = !!p.q; // 全文検索のときだけ全文を読む（重いので普段は読まない）
+  let rows = readRows(sheet, 2, last - 1, needText);
 
   if (p.name) rows = rows.filter(function (r) { return r.name.indexOf(p.name) >= 0; });
   if (p.tel) rows = rows.filter(function (r) { return normTel(r.tel).indexOf(normTel(p.tel)) >= 0; });
   if (p.from) rows = rows.filter(function (r) { return r.datetime >= p.from; });
   if (p.to) rows = rows.filter(function (r) { return r.datetime <= p.to + ' 99'; });
-  if (p.q) rows = rows.filter(function (r) {
-    return (r.name + r.tel + r.summary + r.transcript).indexOf(p.q) >= 0;
-  });
+  if (p.q) {
+    rows = rows.filter(function (r) {
+      return (r.name + r.tel + r.summary + r.transcript).indexOf(p.q) >= 0;
+    });
+    rows.forEach(function (r) { r.transcript = ''; }); // 一覧では使わないので返さない
+  }
 
-  rows.sort(function (a, b) { return a.datetime < b.datetime ? 1 : -1; }); // 新しい順
-  const limit = Math.min(Number(p.limit) || 100, 300);
-  rows = rows.slice(0, limit);
+  rows.sort(byNewest);
+  rows = rows.slice(0, Math.min(Number(p.limit) || 200, 1000));
+  return jsonOut({ count: rows.length, rows: rows, last: last }, cb);
+}
 
-  if (p.full !== '1') rows.forEach(function (r) { // 一覧は全文を先頭120字に
-    if (r.transcript.length > 120) r.transcript = r.transcript.substring(0, 120) + '…';
-  });
+function byNewest(a, b) { return a.datetime < b.datetime ? 1 : -1; }
 
-  return jsonOut({ count: rows.length, rows: rows }, cb);
+/* 必要な列だけ読む。全文(F列)は重いので withText のときだけ読む */
+function readRows(sheet, start, n, withText) {
+  if (n <= 0) return [];
+  const a = sheet.getRange(start, 1, n, 5).getValues();  // 日時〜要約
+  const b = sheet.getRange(start, 7, n, 3).getValues();  // 音声リンク・ファイル名・状態
+  const t = withText ? sheet.getRange(start, 6, n, 1).getValues() : null;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const o = rowObj([a[i][0], a[i][1], a[i][2], a[i][3], a[i][4], '', b[i][0], b[i][1], b[i][2]], start + i);
+    if (t) o.transcript = String(t[i][0]);
+    out.push(o);
+  }
+  return out;
+}
+
+function rowObj(r, id) {
+  return {
+    id: id,
+    datetime: r[0] instanceof Date ? Utilities.formatDate(r[0], 'Asia/Tokyo', 'yyyy-MM-dd HH:mm') : String(r[0]),
+    name: String(r[1]), tel: String(r[2]), length: String(r[3]),
+    summary: String(r[4]), transcript: '',
+    audio: String(r[6]), file: String(r[7]), status: String(r[8])
+  };
 }
 
 /* JSONP対応：callback指定時はJavaScriptとして返す（CORS制約を受けない） */

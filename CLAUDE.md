@@ -24,7 +24,7 @@ PWA（index.html・GitHub Pages）
 
 | パス | 役割 |
 |---|---|
-| `index.html` | 検索PWA。単一ファイル。設定はlocalStorageに保存 |
+| `index.html` | 検索PWA。単一ファイル。設定と取得済み一覧をlocalStorageに保存。起動時は保存分を即表示→増えた分だけ差分取得 |
 | `gas/code.gs` | GAS本体。APIキー・合言葉はコードに書かず**スクリプトプロパティ**から読む |
 
 ## スプレッドシート「通話記録DB」
@@ -53,10 +53,13 @@ PWA（index.html・GitHub Pages）
 ## 検索API（doGet）
 
 ```
-GET <webapp>/exec?token=<API_TOKEN>[&q=][&name=][&tel=][&from=][&to=][&id=][&full=1][&limit=][&callback=]
+GET <webapp>/exec?token=<API_TOKEN>[&q=][&name=][&tel=][&from=][&to=][&id=][&since=&sincekey=][&limit=][&callback=]
 ```
 - `callback` 指定でJSONP（CORS制約を回避するためPWAは常にこちらを使用）
-- `full=1` 以外は全文を先頭120字に切り詰め
+- `since=<行番号>&sincekey=<その行のファイル名>`：**差分取得**。その行より後だけ返す。
+  `sincekey` が一致しない（＝行削除で番号がズレた）ときは `{"reload":true}` を返し、
+  PWAは全件を取り直す
+- 一覧は全文(F列)を読まない。全文が要るのは `id=` の1件詳細と `q=` 検索のときだけ
 - token不一致は `{"error":"unauthorized"}`
 
 ## 実装上の注意（ハマりどころ）

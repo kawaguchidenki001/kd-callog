@@ -161,12 +161,21 @@ label{display:block;font-size:12.5px;font-weight:700;letter-spacing:.08em;color:
 </div>
 
 <script>
-var S={url:'',tok:'',rows:[],days:0,q:'',busy:false};
+var S={url:'',tok:'',all:[],rows:[],days:0,q:'',busy:false,sync:false,seq:0};
 var $=function(i){return document.getElementById(i)};
 
 /* 設定の保存（プライベートモード等で失敗しても動くようにする） */
 function load(){try{S.url=localStorage.getItem('tk_url')||'';S.tok=localStorage.getItem('tk_tok')||''}catch(e){}}
 function save(){try{localStorage.setItem('tk_url',S.url);localStorage.setItem('tk_tok',S.tok)}catch(e){}}
+
+/* 取得済みの通話をローカルに保存しておき、次回は即時表示する
+   （保存するのは一覧に使う分だけ。全文は開いたときに取りに行く） */
+function loadCache(){try{S.all=JSON.parse(localStorage.getItem('tk_rows')||'[]')||[]}catch(e){S.all=[]}}
+function saveCache(){try{
+  localStorage.setItem('tk_rows',JSON.stringify(S.all.slice(0,2000).map(function(r){
+    var o={};for(var k in r)if(k!=='transcript')o[k]=r[k];return o})));
+}catch(e){}}
+function clearCache(){S.all=[];try{localStorage.removeItem('tk_rows')}catch(e){}}
 
 /* 取り込みに失敗した行（要約も全文も無い）かどうか */
 function ng(r){return !!r.status && r.status.indexOf('完了')<0}
@@ -207,14 +216,51 @@ function api(p){
   });
 }
 
-function fetchList(){
-  if(!S.url||!S.tok){show(cfgOpen(true));return}
-  S.busy=true; render();
-  var p='&limit=200'+(S.q?'&q='+encodeURIComponent(S.q):'');
-  api(p).then(function(j){S.rows=j.rows||[];S.busy=false;render()})
-        .catch(function(e){S.busy=false;S.rows=null;render(e.message)});
+/* 保存済みの一覧をそのまま表示 */
+function showAll(){S.rows=S.all;render()}
+
+/* 差分同期：保存済みの続き（新しく増えた分）だけを取りに行く。
+   full=true で全件を取り直す（初回・設定変更・行削除でズレた時） */
+function sync(full){
+  if(!S.url||!S.tok){cfgOpen(true);return}
+  var newest=null;
+  if(!full)S.all.forEach(function(r){if(!newest||r.id>newest.id)newest=r});
+  var p=newest?('&since='+newest.id+'&sincekey='+encodeURIComponent(newest.file||''))
+              :'&limit=1000';
+  S.sync=true; if(!S.all.length)S.busy=true;
+  render();
+  api(p).then(function(j){
+    if(j.reload){clearCache();S.sync=false;return sync(true)} // 番号がズレた→取り直し
+    var rows=j.rows||[];
+    if(j.added){if(rows.length)S.all=merge(rows,S.all)}
+    else S.all=rows;
+    saveCache(); S.sync=false; S.busy=false;
+    if(S.q)render(); else showAll();
+  }).catch(function(e){
+    S.sync=false; S.busy=false;
+    if(S.all.length)render();                    // 保存分があるので表示は続ける
+    else {S.rows=null;render(e.message)}
+  });
 }
-function show(){}
+function merge(add,old){
+  var seen={},out=[];
+  add.concat(old).forEach(function(r){if(!seen[r.id]){seen[r.id]=1;out.push(r)}});
+  out.sort(function(a,b){return a.datetime<b.datetime?1:-1});
+  return out;
+}
+
+/* 検索：まず保存分から即時に絞り込み、続けてサーバーで全文検索して差し替える */
+function doSearch(){
+  if(!S.q){showAll();return}
+  var q=S.q, n=++S.seq;
+  S.rows=S.all.filter(function(r){
+    return ((r.name||'')+(r.tel||'')+(r.summary||'')).indexOf(q)>=0});
+  S.sync=true; render();
+  api('&limit=300&q='+encodeURIComponent(q)).then(function(j){
+    if(n!==S.seq)return;                          // 入力が進んでいたら捨てる
+    S.rows=j.rows||[]; S.sync=false; render();
+  }).catch(function(){if(n===S.seq){S.sync=false;render()}});
+}
 
 function filtered(){
   if(!S.rows) return [];
@@ -229,7 +275,7 @@ function render(err){
   if(S.busy){L.innerHTML='<div class="note"><div class="spin"></div>読み込んでいます</div>';$('count').textContent='';return}
   if(err){L.innerHTML='<div class="note"><b>読み込めませんでした</b>'+esc(err)+'</div>';$('count').textContent='';return}
   var rows=filtered();
-  $('count').textContent=rows.length?rows.length+'件':'';
+  $('count').textContent=(S.sync?'更新中 ':'')+(rows.length?rows.length+'件':'');
   if(!rows.length){
     L.innerHTML='<div class="note"><b>'+(S.q?'見つかりません':'まだ記録がありません')+'</b>'+
       (S.q?'別のことばで探してみてください':'電話をかけると自動で記録されます')+'</div>';return}
@@ -283,9 +329,9 @@ var tm=null;
 $('q').oninput=function(){
   $('clear').style.display=this.value?'block':'none';
   clearTimeout(tm); var v=this.value.trim();
-  tm=setTimeout(function(){S.q=v;fetchList()},420);
+  tm=setTimeout(function(){S.q=v;doSearch()},420);
 };
-$('clear').onclick=function(){$('q').value='';$('clear').style.display='none';S.q='';fetchList()};
+$('clear').onclick=function(){$('q').value='';$('clear').style.display='none';S.q='';showAll()};
 Array.prototype.forEach.call($('chips').children,function(c){
   c.onclick=function(){
     Array.prototype.forEach.call($('chips').children,function(o){o.setAttribute('aria-pressed','false')});
@@ -324,11 +370,16 @@ $('cSave').onclick=function(){
     $('cErr').textContent='URLは https://script.google.com/… で始まり /exec で終わります';
     $('cErr').style.display='block';return}
   if(!t){$('cErr').textContent='合言葉を入れてください';$('cErr').style.display='block';return}
-  S.url=u;S.tok=t;save();$('cfg').classList.remove('on');fetchList();
+  S.url=u;S.tok=t;save();clearCache();$('cfg').classList.remove('on');sync(true);
 };
 
-load();
-if(S.url&&S.tok) fetchList(); else cfgOpen(true);
+load(); loadCache();
+if(S.url&&S.tok){ if(S.all.length)showAll(); sync(false) } else cfgOpen(true);
+
+/* アプリに戻ってきたときに、増えた分だけ静かに取りに行く */
+document.addEventListener('visibilitychange',function(){
+  if(!document.hidden&&S.url&&S.tok&&!S.sync&&!S.q)sync(false);
+});
 </script>
 </body>
 </html>
