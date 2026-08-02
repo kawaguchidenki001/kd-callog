@@ -73,7 +73,11 @@ function setup() {
 
 /* ============ メイン処理（5分毎に自動実行） ============ */
 function processNewRecordings() {
-  if (CONFIG.GEMINI_API_KEY.indexOf('ここに') === 0) return; // キー未設定なら何もしない
+  // キー未設定なら何もしない（空のまま動かすと全件エラー行になってしまうため）
+  if (!CONFIG.GEMINI_API_KEY || CONFIG.GEMINI_API_KEY.indexOf('ここに') === 0) {
+    Logger.log('GEMINI_API_KEY が未設定です。CONFIG に APIキーを入れてください');
+    return;
+  }
 
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(0)) return; // 前回実行中なら重複起動しない
