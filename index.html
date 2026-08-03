@@ -31,7 +31,8 @@ header{
 }
 .htop{display:flex;align-items:center;gap:10px}
 .htitle{font-size:15px;font-weight:700;letter-spacing:.14em;flex:1}
-.hcount{font-size:12px;color:#9DB4BE;font-variant-numeric:tabular-nums}
+.hcount{font-size:12px;color:#9DB4BE;font-variant-numeric:tabular-nums;cursor:pointer}
+.hcount.bad{color:#F0B9B9}
 .gear{background:none;border:0;color:#9DB4BE;font-size:20px;padding:4px 6px;cursor:pointer}
 .search{display:flex;align-items:center;gap:8px;margin-top:9px;background:#22323F;border-radius:11px;padding:0 12px}
 .search input{flex:1;background:none;border:0;outline:none;color:#fff;padding:12px 0;font-size:16px}
@@ -161,7 +162,7 @@ label{display:block;font-size:12.5px;font-weight:700;letter-spacing:.08em;color:
 </div>
 
 <script>
-var S={url:'',tok:'',all:[],rows:[],days:0,q:'',busy:false,sync:false,seq:0};
+var S={url:'',tok:'',all:[],rows:[],days:0,q:'',busy:false,sync:false,seq:0,serr:''};
 var $=function(i){return document.getElementById(i)};
 
 /* 設定の保存（プライベートモード等で失敗しても動くようにする） */
@@ -236,9 +237,10 @@ function sync(full){
     else S.all=rows;
     saveCache(); S.sync=false; S.busy=false;
     if(S.q)render(); else showAll();
+    S.serr='';
   }).catch(function(e){
     S.sync=false; S.busy=false;
-    if(S.all.length)render();                    // 保存分があるので表示は続ける
+    if(S.all.length){S.serr=e.message;render()}   // 保存分は表示したまま、失敗は隠さない
     else {S.rows=null;render(e.message)}
   });
 }
@@ -275,7 +277,10 @@ function render(err){
   if(S.busy){L.innerHTML='<div class="note"><div class="spin"></div>読み込んでいます</div>';$('count').textContent='';return}
   if(err){L.innerHTML='<div class="note"><b>読み込めませんでした</b>'+esc(err)+'</div>';$('count').textContent='';return}
   var rows=filtered();
-  $('count').textContent=(S.sync?'更新中 ':'')+(rows.length?rows.length+'件':'');
+  var c=$('count');
+  c.className='hcount'+(S.serr&&!S.sync?' bad':'');
+  c.title=S.serr||'';
+  c.textContent=(S.sync?'更新中 ':(S.serr?'⚠更新できず ':''))+(rows.length?rows.length+'件':'');
   if(!rows.length){
     L.innerHTML='<div class="note"><b>'+(S.q?'見つかりません':'まだ記録がありません')+'</b>'+
       (S.q?'別のことばで探してみてください':'電話をかけると自動で記録されます')+'</div>';return}
@@ -345,6 +350,8 @@ function cfgOpen(first){
   $('cBack').style.display=first?'none':'';
   $('cfg').classList.add('on');
 }
+/* 件数をタップしたら手動で更新（失敗したときの再試行にも使う） */
+$('count').onclick=function(){if(!S.sync&&S.url&&S.tok){S.serr='';sync(false)}};
 $('gear').onclick=function(){cfgOpen(false)};
 /* 接続テスト：保存せずに今入っている値で1回だけ問い合わせ、結果をそのまま表示する */
 $('cTest').onclick=function(){
